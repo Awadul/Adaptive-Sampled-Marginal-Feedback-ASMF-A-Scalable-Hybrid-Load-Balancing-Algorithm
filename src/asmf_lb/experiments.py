@@ -66,7 +66,16 @@ def run_benchmark_suite(
 
 
 def _plot_metric(df: pd.DataFrame, metric: str, outpath: Path, title: str) -> None:
-    order = ["asmf", "p2c", "least_queue", "random"]
+    # Determine available policies in the dataframe
+    available = df["policy"].unique().tolist()
+    # Preferred order: asmf, gmsr, p2c, least_queue, random
+    preferred_order = ["asmf", "gmsr", "p2c", "least_queue", "random"]
+    order = [p for p in preferred_order if p in available]
+    # Add any remaining policies not in preferred order
+    for p in available:
+        if p not in order:
+            order.append(p)
+    
     data = [df[df["policy"] == p][metric] for p in order]
 
     plt.figure(figsize=(9, 5))
@@ -93,7 +102,7 @@ def experiment_config_dump(output_dir: str) -> None:
             {
                 "simulation": asdict(sim_cfg),
                 "asmf": asdict(asmf_cfg),
-                "policies": ["asmf", "p2c", "least_queue", "random"],
+                "policies": ["asmf", "gmsr", "p2c", "least_queue", "random"],
             },
             f,
             indent=2,
@@ -110,7 +119,7 @@ def run_rigorous_campaign(
 
     seeds = seeds or list(range(101, 121))
     scenarios = scenarios or _default_scenarios()
-    policies = ["asmf", "p2c", "least_queue", "random"]
+    policies = ["asmf", "gmsr", "p2c", "least_queue", "random"]
 
     rows: List[Dict[str, Any]] = []
     for scenario in scenarios:
@@ -207,7 +216,7 @@ def _summarize_with_ci(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _pairwise_improvement(df: pd.DataFrame) -> pd.DataFrame:
-    baselines = ["p2c", "least_queue", "random"]
+    baselines = ["gmsr", "p2c", "least_queue", "random"]
     rows: List[Dict[str, Any]] = []
 
     for base in baselines:
@@ -256,7 +265,7 @@ def _build_markdown_report(df: pd.DataFrame, summary: pd.DataFrame, comparisons:
         f"- Total runs: {len(df)}",
         f"- Unique scenarios: {df['scenario'].nunique()}",
         f"- Seeds per scenario: {df['seed'].nunique()}",
-        "- Policies: asmf, p2c, least_queue, random",
+        "- Policies: asmf, gmsr (oracle), p2c, least_queue, random",
         "",
         "## Policy Summary With 95% CI",
         "",

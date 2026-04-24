@@ -107,6 +107,8 @@ class LoadBalancingSimulator:
             return engine.route_least_queue(frontend, states)
         if policy == "p2c":
             return engine.route_power_of_k(frontend, states)
+        if policy == "gmsr":
+            return engine.route_gmsr(frontend, states)
         raise ValueError(f"Unknown policy: {policy}")
 
     def _service_step(

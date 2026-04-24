@@ -80,7 +80,7 @@ def main() -> None:
     scenario_means.to_csv(out_dir / "scenario_policy_means.csv", index=False)
 
     # Pairwise detailed and scenario aggregate tables.
-    baselines = ["p2c", "least_queue", "random"]
+    baselines = ["gmsr", "p2c", "least_queue", "random"]
     detailed_parts = []
     scenario_rows = []
     overall_rows = []

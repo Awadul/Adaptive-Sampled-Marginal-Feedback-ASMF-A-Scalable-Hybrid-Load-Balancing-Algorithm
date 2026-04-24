@@ -95,6 +95,26 @@ class ASMFEngine:
         score = self._fresh_score(states[chosen])
         return RoutingDecision(frontend.frontend_id, chosen, candidates, score, "route")
 
+    def route_gmsr(self, frontend: Frontend, states: Dict[str, ServerState]) -> RoutingDecision:
+        """Oracle GMSR: full state knowledge, marginal reduction optimization.
+        
+        GMSR (Generalized Sampling with Marginal Reduction) assumes complete observability
+        and chooses the backend that minimizes the maximum queue length across all servers
+        (or equivalently, maximizes the marginal reduction in total backlog).
+        """
+        allowed = [backend for backend in frontend.allowed_backends if backend in states]
+        if not allowed:
+            return RoutingDecision(frontend.frontend_id, None, [], 0.0, "reject")
+
+        # Full observability: choose the globally least-loaded allowed backend.
+        best_backend = min(allowed, key=lambda sid: states[sid].queue_length)
+
+        if best_backend is None:
+            return RoutingDecision(frontend.frontend_id, None, allowed, 0.0, "reject")
+
+        score = self._fresh_score(states[best_backend])
+        return RoutingDecision(frontend.frontend_id, best_backend, allowed, score, "route")
+
     def _sample_candidates(self, allowed: List[str]) -> List[str]:
         k = min(self.config.sample_k, len(allowed))
         return self.rng.sample(allowed, k=k)
