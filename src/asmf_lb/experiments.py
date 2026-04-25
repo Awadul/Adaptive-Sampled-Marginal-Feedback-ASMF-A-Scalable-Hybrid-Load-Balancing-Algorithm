@@ -25,7 +25,7 @@ def run_benchmark_suite(
     seeds = seeds or [11, 17, 23, 31, 47]
     sim_config = config or SimulationConfig()
     algo_config = asmf_config or ASMFConfig()
-    policies = ["asmf", "p2c", "least_queue", "random"]
+    policies = ["asmf", "asmf_no_feedback", "asmf_no_sampling", "asmf_no_multiresource", "gmsr", "p2c", "least_queue", "random"]
 
     rows: List[Dict[str, float]] = []
 
@@ -69,7 +69,16 @@ def _plot_metric(df: pd.DataFrame, metric: str, outpath: Path, title: str) -> No
     # Determine available policies in the dataframe
     available = df["policy"].unique().tolist()
     # Preferred order: asmf, gmsr, p2c, least_queue, random
-    preferred_order = ["asmf", "gmsr", "p2c", "least_queue", "random"]
+    preferred_order = [
+        "asmf",
+        "asmf_no_feedback",
+        "asmf_no_sampling",
+        "asmf_no_multiresource",
+        "gmsr",
+        "p2c",
+        "least_queue",
+        "random",
+    ]
     order = [p for p in preferred_order if p in available]
     # Add any remaining policies not in preferred order
     for p in available:
@@ -102,7 +111,16 @@ def experiment_config_dump(output_dir: str) -> None:
             {
                 "simulation": asdict(sim_cfg),
                 "asmf": asdict(asmf_cfg),
-                "policies": ["asmf", "gmsr", "p2c", "least_queue", "random"],
+                "policies": [
+                    "asmf",
+                    "asmf_no_feedback",
+                    "asmf_no_sampling",
+                    "asmf_no_multiresource",
+                    "gmsr",
+                    "p2c",
+                    "least_queue",
+                    "random",
+                ],
             },
             f,
             indent=2,
@@ -119,9 +137,19 @@ def run_rigorous_campaign(
 
     seeds = seeds or list(range(101, 121))
     scenarios = scenarios or _default_scenarios()
-    policies = ["asmf", "gmsr", "p2c", "least_queue", "random"]
+    policies = [
+        "asmf",
+        "asmf_no_feedback",
+        "asmf_no_sampling",
+        "asmf_no_multiresource",
+        "gmsr",
+        "p2c",
+        "least_queue",
+        "random",
+    ]
 
     rows: List[Dict[str, Any]] = []
+    trace_rows: List[Dict[str, Any]] = []
     for scenario in scenarios:
         sim_cfg = SimulationConfig(
             duration_ms=int(scenario["duration_ms"]),
@@ -130,6 +158,20 @@ def run_rigorous_campaign(
             stale_update_interval_ms=int(scenario["stale_update_interval_ms"]),
             reject_instead_of_delay=bool(scenario.get("reject_instead_of_delay", True)),
             max_delay_buffer=int(scenario.get("max_delay_buffer", 500)),
+            workload_type=str(scenario.get("workload_type", "poisson")),
+            burst_on_multiplier=float(scenario.get("burst_on_multiplier", 2.5)),
+            burst_off_multiplier=float(scenario.get("burst_off_multiplier", 0.4)),
+            burst_period_steps=int(scenario.get("burst_period_steps", 60)),
+            zipf_alpha=float(scenario.get("zipf_alpha", 1.2)),
+            hotspot_fraction=float(scenario.get("hotspot_fraction", 0.2)),
+            backend_failure_at_ms=int(scenario.get("backend_failure_at_ms", -1)),
+            failure_fraction=float(scenario.get("failure_fraction", 0.0)),
+            load_spike_at_ms=int(scenario.get("load_spike_at_ms", -1)),
+            load_spike_multiplier=float(scenario.get("load_spike_multiplier", 1.0)),
+            load_spike_duration_ms=int(scenario.get("load_spike_duration_ms", 0)),
+            degrade_at_ms=int(scenario.get("degrade_at_ms", -1)),
+            degrade_factor=float(scenario.get("degrade_factor", 1.0)),
+            trace_interval_ms=int(scenario.get("trace_interval_ms", 1000)),
         )
         asmf_cfg = ASMFConfig(
             sample_k=int(scenario["sample_k"]),
@@ -153,17 +195,37 @@ def run_rigorous_campaign(
                 row["seed"] = seed
                 row["scenario"] = scenario["name"]
                 row["duration_ms"] = sim_cfg.duration_ms
+                row["time_step_ms"] = sim_cfg.time_step_ms
                 row["arrivals_per_step"] = sim_cfg.arrivals_per_step
                 row["stale_update_interval_ms"] = sim_cfg.stale_update_interval_ms
+                row["workload_type"] = sim_cfg.workload_type
                 row["num_frontends"] = scenario["num_frontends"]
                 row["num_backends"] = scenario["num_backends"]
                 row["sample_k"] = asmf_cfg.sample_k
                 row["threshold"] = asmf_cfg.threshold
                 row["eta"] = asmf_cfg.eta
+                row["failure_fraction"] = sim_cfg.failure_fraction
+                row["load_spike_multiplier"] = sim_cfg.load_spike_multiplier
+                row["degrade_factor"] = sim_cfg.degrade_factor
                 rows.append(row)
+
+                for rec in metrics.trace_records:
+                    trace_rows.append(
+                        {
+                            "scenario": scenario["name"],
+                            "seed": seed,
+                            "policy": policy,
+                            "time_ms": int(rec["time_ms"]),
+                            "queue_mean": rec["queue_mean"],
+                            "queue_var": rec["queue_var"],
+                            "rejection_rate": rec["rejection_rate"],
+                        }
+                    )
 
     df = pd.DataFrame(rows)
     df.to_csv(output / "rigorous_results.csv", index=False)
+    if trace_rows:
+        pd.DataFrame(trace_rows).to_csv(output / "rigorous_time_series.csv", index=False)
 
     summary = _summarize_with_ci(df)
     summary.to_csv(output / "rigorous_summary_ci.csv", index=False)
@@ -174,6 +236,14 @@ def run_rigorous_campaign(
     _plot_metric(df, "throughput", output / "rigorous_throughput_boxplot.png", "Rigorous Throughput by Policy")
     _plot_metric(df, "avg_wait_time", output / "rigorous_wait_boxplot.png", "Rigorous Wait Time by Policy")
     _plot_metric(df, "backlog_area", output / "rigorous_backlog_boxplot.png", "Rigorous Backlog by Policy")
+    _plot_metric(df, "state_queries", output / "rigorous_state_queries_boxplot.png", "Rigorous State Query Cost by Policy")
+    _plot_metric(
+        df,
+        "bytes_transferred_est",
+        output / "rigorous_bytes_transferred_boxplot.png",
+        "Rigorous Communication Bytes by Policy",
+    )
+    _plot_metric(df, "convergence_time_ms", output / "rigorous_convergence_time_boxplot.png", "Rigorous Convergence Time by Policy")
 
     report = _build_markdown_report(df, summary, comparisons)
     with open(output / "rigorous_report.md", "w", encoding="utf-8") as f:
@@ -196,7 +266,18 @@ def run_rigorous_campaign(
 
 def _summarize_with_ci(df: pd.DataFrame) -> pd.DataFrame:
     rows: List[Dict[str, Any]] = []
-    metrics = ["throughput", "avg_wait_time", "backlog_area", "max_queue_observed"]
+    metrics = [
+        "throughput",
+        "avg_wait_time",
+        "backlog_area",
+        "max_queue_observed",
+        "state_queries",
+        "bytes_transferred_est",
+        "queries_per_decision",
+        "convergence_time_ms",
+        "mean_queue_variance",
+        "oscillation_index",
+    ]
 
     grouped = df.groupby("policy")
     for policy, g in grouped:
@@ -216,7 +297,7 @@ def _summarize_with_ci(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _pairwise_improvement(df: pd.DataFrame) -> pd.DataFrame:
-    baselines = ["gmsr", "p2c", "least_queue", "random"]
+    baselines = [p for p in sorted(df["policy"].unique().tolist()) if p != "asmf"]
     rows: List[Dict[str, Any]] = []
 
     for base in baselines:
@@ -256,6 +337,27 @@ def _build_markdown_report(df: pd.DataFrame, summary: pd.DataFrame, comparisons:
     scenario_counts = (
         df.groupby(["scenario", "policy"]).size().reset_index(name="runs").sort_values(["scenario", "policy"])
     )
+    workload_counts = (
+        df.groupby(["workload_type", "policy"]).size().reset_index(name="runs").sort_values(["workload_type", "policy"])
+    )
+    comm_summary = (
+        df.groupby("policy", as_index=False)
+        .agg(
+            state_queries_mean=("state_queries", "mean"),
+            bytes_transferred_est_mean=("bytes_transferred_est", "mean"),
+            queries_per_decision_mean=("queries_per_decision", "mean"),
+        )
+        .sort_values("queries_per_decision_mean")
+    )
+    convergence_summary = (
+        df.groupby("policy", as_index=False)
+        .agg(
+            convergence_time_ms_mean=("convergence_time_ms", "mean"),
+            mean_queue_variance_mean=("mean_queue_variance", "mean"),
+            oscillation_index_mean=("oscillation_index", "mean"),
+        )
+        .sort_values("convergence_time_ms_mean")
+    )
 
     lines = [
         "# Rigorous Benchmark Report",
@@ -265,7 +367,7 @@ def _build_markdown_report(df: pd.DataFrame, summary: pd.DataFrame, comparisons:
         f"- Total runs: {len(df)}",
         f"- Unique scenarios: {df['scenario'].nunique()}",
         f"- Seeds per scenario: {df['seed'].nunique()}",
-        "- Policies: asmf, gmsr (oracle), p2c, least_queue, random",
+        "- Policies: asmf, asmf_no_feedback, asmf_no_sampling, asmf_no_multiresource, gmsr, p2c, least_queue, random",
         "",
         "## Policy Summary With 95% CI",
         "",
@@ -274,6 +376,18 @@ def _build_markdown_report(df: pd.DataFrame, summary: pd.DataFrame, comparisons:
         "## ASMF Pairwise Improvements",
         "",
         comparisons.to_markdown(index=False),
+        "",
+        "## Communication Cost Summary",
+        "",
+        comm_summary.to_markdown(index=False),
+        "",
+        "## Convergence Summary",
+        "",
+        convergence_summary.to_markdown(index=False),
+        "",
+        "## Workload Coverage",
+        "",
+        workload_counts.to_markdown(index=False),
         "",
         "## Scenario Coverage",
         "",
@@ -286,63 +400,118 @@ def _build_markdown_report(df: pd.DataFrame, summary: pd.DataFrame, comparisons:
 def _default_scenarios() -> List[Dict[str, Any]]:
     return [
         {
-            "name": "balanced_baseline",
+            "name": "poisson_small",
             "duration_ms": 600_000,
-            "arrivals_per_step": 7.0,
+            "arrivals_per_step": 6.0,
             "stale_update_interval_ms": 300,
             "num_frontends": 4,
-            "num_backends": 12,
+            "num_backends": 10,
             "sample_k": 2,
             "threshold": 0.12,
             "eta": 0.05,
             "resource_weights": [0.4, 0.25, 0.2, 0.15],
+            "workload_type": "poisson",
         },
         {
-            "name": "high_load",
+            "name": "poisson_medium",
             "duration_ms": 600_000,
-            "arrivals_per_step": 11.0,
+            "arrivals_per_step": 8.0,
             "stale_update_interval_ms": 300,
-            "num_frontends": 4,
-            "num_backends": 12,
-            "sample_k": 2,
+            "num_frontends": 8,
+            "num_backends": 50,
+            "sample_k": 3,
             "threshold": 0.10,
             "eta": 0.06,
             "resource_weights": [0.4, 0.25, 0.2, 0.15],
+            "workload_type": "poisson",
         },
         {
-            "name": "very_stale_state",
-            "duration_ms": 600_000,
-            "arrivals_per_step": 7.5,
-            "stale_update_interval_ms": 900,
-            "num_frontends": 4,
-            "num_backends": 12,
-            "sample_k": 2,
-            "threshold": 0.12,
-            "eta": 0.07,
-            "resource_weights": [0.4, 0.25, 0.2, 0.15],
-        },
-        {
-            "name": "larger_cluster",
+            "name": "poisson_large",
             "duration_ms": 600_000,
             "arrivals_per_step": 10.0,
-            "stale_update_interval_ms": 300,
-            "num_frontends": 8,
-            "num_backends": 24,
-            "sample_k": 3,
+            "stale_update_interval_ms": 400,
+            "num_frontends": 20,
+            "num_backends": 220,
+            "sample_k": 4,
             "threshold": 0.10,
             "eta": 0.05,
             "resource_weights": [0.35, 0.25, 0.2, 0.2],
+            "workload_type": "poisson",
         },
         {
-            "name": "memory_pressure",
+            "name": "bursty_medium",
             "duration_ms": 600_000,
-            "arrivals_per_step": 8.5,
-            "stale_update_interval_ms": 400,
-            "num_frontends": 5,
-            "num_backends": 16,
+            "arrivals_per_step": 8.0,
+            "stale_update_interval_ms": 300,
+            "num_frontends": 8,
+            "num_backends": 50,
+            "sample_k": 3,
+            "threshold": 0.10,
+            "eta": 0.05,
+            "resource_weights": [0.4, 0.25, 0.2, 0.15],
+            "workload_type": "bursty",
+            "burst_on_multiplier": 3.0,
+            "burst_off_multiplier": 0.3,
+            "burst_period_steps": 45,
+        },
+        {
+            "name": "zipf_skew_medium",
+            "duration_ms": 600_000,
+            "arrivals_per_step": 8.0,
+            "stale_update_interval_ms": 300,
+            "num_frontends": 8,
+            "num_backends": 50,
             "sample_k": 3,
             "threshold": 0.11,
             "eta": 0.05,
             "resource_weights": [0.2, 0.45, 0.2, 0.15],
+            "workload_type": "zipf_skew",
+            "zipf_alpha": 1.35,
+        },
+        {
+            "name": "failure_medium",
+            "duration_ms": 600_000,
+            "arrivals_per_step": 8.0,
+            "stale_update_interval_ms": 300,
+            "num_frontends": 8,
+            "num_backends": 50,
+            "sample_k": 3,
+            "threshold": 0.10,
+            "eta": 0.05,
+            "resource_weights": [0.4, 0.25, 0.2, 0.15],
+            "workload_type": "poisson",
+            "backend_failure_at_ms": 240_000,
+            "failure_fraction": 0.2,
+        },
+        {
+            "name": "spike_medium",
+            "duration_ms": 600_000,
+            "arrivals_per_step": 8.0,
+            "stale_update_interval_ms": 300,
+            "num_frontends": 8,
+            "num_backends": 50,
+            "sample_k": 3,
+            "threshold": 0.10,
+            "eta": 0.05,
+            "resource_weights": [0.4, 0.25, 0.2, 0.15],
+            "workload_type": "poisson",
+            "load_spike_at_ms": 300_000,
+            "load_spike_multiplier": 2.0,
+            "load_spike_duration_ms": 60_000,
+        },
+        {
+            "name": "degraded_medium",
+            "duration_ms": 600_000,
+            "arrivals_per_step": 8.0,
+            "stale_update_interval_ms": 300,
+            "num_frontends": 8,
+            "num_backends": 50,
+            "sample_k": 3,
+            "threshold": 0.10,
+            "eta": 0.05,
+            "resource_weights": [0.4, 0.25, 0.2, 0.15],
+            "workload_type": "poisson",
+            "degrade_at_ms": 240_000,
+            "degrade_factor": 0.7,
         },
     ]

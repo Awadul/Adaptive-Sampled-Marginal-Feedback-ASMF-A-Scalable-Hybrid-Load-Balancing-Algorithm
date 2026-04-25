@@ -3,7 +3,9 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Set, Tuple
+
+import numpy as np
 
 from .engine import ASMFEngine
 from .models import Frontend, Job, ResourceVector, ServerState, SimulationMetrics
@@ -17,6 +19,22 @@ class SimulationConfig:
     stale_update_interval_ms: int = 300
     reject_instead_of_delay: bool = True
     max_delay_buffer: int = 500
+    workload_type: str = "poisson"
+    burst_on_multiplier: float = 2.5
+    burst_off_multiplier: float = 0.4
+    burst_period_steps: int = 60
+    zipf_alpha: float = 1.2
+    hotspot_fraction: float = 0.2
+    backend_failure_at_ms: int = -1
+    failure_fraction: float = 0.0
+    load_spike_at_ms: int = -1
+    load_spike_multiplier: float = 1.0
+    load_spike_duration_ms: int = 0
+    degrade_at_ms: int = -1
+    degrade_factor: float = 1.0
+    trace_interval_ms: int = 1000
+    convergence_window_points: int = 12
+    convergence_tolerance: float = 0.05
 
 
 class LoadBalancingSimulator:
@@ -36,22 +54,33 @@ class LoadBalancingSimulator:
         states = self._clone_states()
         metrics = SimulationMetrics(policy=policy)
         delayed_jobs: List[Job] = []
+        failed_backends: Set[str] = set()
+        scale_degraded = False
+        convergence_found = False
+        queue_trace: List[float] = []
 
         next_job_id = 0
         now_ms = 0
         while now_ms < self.config.duration_ms:
+            self._apply_events(states, now_ms, failed_backends, scale_degraded)
+            if self.config.degrade_at_ms >= 0 and now_ms >= self.config.degrade_at_ms:
+                scale_degraded = True
+
             if now_ms % self.config.stale_update_interval_ms == 0:
                 engine.update_cache(states.values())
+                metrics.state_updates_sent += len(states)
+                metrics.bytes_transferred_est += len(states) * 64
 
             self._service_step(states, metrics, self.config.time_step_ms)
 
             for st in states.values():
                 st.timestamp_ms = now_ms
-                engine.apply_feedback(st)
+                if policy != "asmf_no_feedback":
+                    engine.apply_feedback(st)
 
-            arrivals = self._poisson(self.config.arrivals_per_step)
+            arrivals = self._arrival_count(now_ms)
             for _ in range(arrivals):
-                frontend = self.rng.choice(self.frontends)
+                frontend = self._choose_frontend(states)
                 job = Job(
                     job_id=next_job_id,
                     frontend_id=frontend.frontend_id,
@@ -62,6 +91,9 @@ class LoadBalancingSimulator:
                 metrics.jobs_generated += 1
 
                 decision = self._dispatch(policy, engine, frontend, states)
+                qcount = self._query_count(policy, frontend, decision, states)
+                metrics.state_queries += qcount
+                metrics.bytes_transferred_est += qcount * 48
                 if decision.action == "route" and decision.chosen_backend is not None:
                     self._enqueue(states[decision.chosen_backend], job)
                     metrics.jobs_routed += 1
@@ -77,6 +109,9 @@ class LoadBalancingSimulator:
             for job in delayed_jobs:
                 frontend = next(f for f in self.frontends if f.frontend_id == job.frontend_id)
                 decision = self._dispatch(policy, engine, frontend, states)
+                qcount = self._query_count(policy, frontend, decision, states)
+                metrics.state_queries += qcount
+                metrics.bytes_transferred_est += qcount * 48
                 if decision.action == "route" and decision.chosen_backend is not None:
                     self._enqueue(states[decision.chosen_backend], job)
                     metrics.jobs_routed += 1
@@ -88,7 +123,43 @@ class LoadBalancingSimulator:
             metrics.backlog_area += total_queue * (self.config.time_step_ms / 1000.0)
             metrics.max_queue_observed = max(metrics.max_queue_observed, total_queue)
             metrics.queue_snapshots[now_ms] = {sid: st.queue_length for sid, st in states.items()}
+
+            if now_ms % max(self.config.trace_interval_ms, self.config.time_step_ms) == 0:
+                queue_values = [st.queue_length for st in states.values()]
+                queue_mean = float(sum(queue_values) / max(len(queue_values), 1))
+                queue_var = float(np.var(queue_values)) if queue_values else 0.0
+                rejection_rate = metrics.jobs_rejected / max(metrics.jobs_generated, 1)
+                metrics.trace_points += 1
+                metrics.trace_sum_queue_mean += queue_mean
+                metrics.trace_sum_queue_var += queue_var
+                metrics.trace_sum_rejection_rate += rejection_rate
+                metrics.trace_records.append(
+                    {
+                        "time_ms": float(now_ms),
+                        "queue_mean": queue_mean,
+                        "queue_var": queue_var,
+                        "rejection_rate": rejection_rate,
+                    }
+                )
+                queue_trace.append(queue_mean)
+
+                if not convergence_found and len(queue_trace) >= self.config.convergence_window_points:
+                    window = queue_trace[-self.config.convergence_window_points :]
+                    mean_w = sum(window) / len(window)
+                    max_dev = max(abs(v - mean_w) for v in window) / max(abs(mean_w), 1.0)
+                    if max_dev <= self.config.convergence_tolerance:
+                        metrics.convergence_time_ms = now_ms
+                        convergence_found = True
+
             now_ms += self.config.time_step_ms
+
+        if metrics.convergence_time_ms == 0:
+            metrics.convergence_time_ms = self.config.duration_ms
+
+        if len(queue_trace) > 1:
+            metrics.mean_queue_variance = float(np.var(queue_trace))
+            deltas = [abs(queue_trace[i] - queue_trace[i - 1]) for i in range(1, len(queue_trace))]
+            metrics.oscillation_index = float(sum(deltas) / len(deltas))
 
         return metrics
 
@@ -101,6 +172,12 @@ class LoadBalancingSimulator:
     ):
         if policy == "asmf":
             return engine.route(frontend, states)
+        if policy == "asmf_no_feedback":
+            return engine.route_asmf_no_feedback(frontend, states)
+        if policy == "asmf_no_sampling":
+            return engine.route_asmf_no_sampling(frontend, states)
+        if policy == "asmf_no_multiresource":
+            return engine.route_asmf_no_multiresource(frontend, states)
         if policy == "random":
             return engine.route_random(frontend, states)
         if policy == "least_queue":
@@ -110,6 +187,68 @@ class LoadBalancingSimulator:
         if policy == "gmsr":
             return engine.route_gmsr(frontend, states)
         raise ValueError(f"Unknown policy: {policy}")
+
+    def _query_count(self, policy: str, frontend: Frontend, decision, states: Dict[str, ServerState]) -> int:
+        allowed_count = len([sid for sid in frontend.allowed_backends if sid in states])
+        if policy in {"gmsr", "least_queue", "asmf_no_sampling"}:
+            return allowed_count
+        if policy == "random":
+            return 1
+        return max(len(decision.sampled_backends), 1)
+
+    def _arrival_count(self, now_ms: int) -> int:
+        lam = self.config.arrivals_per_step
+        step_idx = now_ms // max(self.config.time_step_ms, 1)
+
+        if self.config.workload_type == "bursty":
+            period = max(self.config.burst_period_steps, 1)
+            in_on = (step_idx // period) % 2 == 0
+            lam *= self.config.burst_on_multiplier if in_on else self.config.burst_off_multiplier
+
+        if self.config.load_spike_at_ms >= 0:
+            spike_end = self.config.load_spike_at_ms + max(self.config.load_spike_duration_ms, 0)
+            if self.config.load_spike_at_ms <= now_ms < spike_end:
+                lam *= self.config.load_spike_multiplier
+
+        return self._poisson(max(lam, 0.0))
+
+    def _choose_frontend(self, states: Dict[str, ServerState]) -> Frontend:
+        if self.config.workload_type != "zipf_skew":
+            return self.rng.choice(self.frontends)
+
+        fronts = self.frontends
+        n = len(fronts)
+        if n == 0:
+            raise ValueError("No frontends available")
+
+        weights = [1.0 / ((i + 1) ** max(self.config.zipf_alpha, 0.1)) for i in range(n)]
+        total_w = sum(weights)
+        r = self.rng.random() * total_w
+        acc = 0.0
+        for i, w in enumerate(weights):
+            acc += w
+            if acc >= r:
+                return fronts[i]
+        return fronts[-1]
+
+    def _apply_events(
+        self,
+        states: Dict[str, ServerState],
+        now_ms: int,
+        failed_backends: Set[str],
+        scale_degraded: bool,
+    ) -> None:
+        if self.config.backend_failure_at_ms >= 0 and now_ms == self.config.backend_failure_at_ms and self.config.failure_fraction > 0.0:
+            candidates = [sid for sid in states if sid not in failed_backends]
+            k = max(1, int(len(candidates) * self.config.failure_fraction))
+            for sid in self.rng.sample(candidates, k=min(k, len(candidates))):
+                failed_backends.add(sid)
+                states[sid].service_capacity = 0.0
+
+        if self.config.degrade_at_ms >= 0 and now_ms == self.config.degrade_at_ms and not scale_degraded:
+            factor = max(min(self.config.degrade_factor, 1.0), 0.05)
+            for sid in states:
+                states[sid].service_capacity *= factor
 
     def _service_step(
         self,

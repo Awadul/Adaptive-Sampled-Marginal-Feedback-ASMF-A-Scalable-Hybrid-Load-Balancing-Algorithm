@@ -74,7 +74,7 @@ class ASMFEngine:
 
         chosen = self.rng.choice(allowed)
         score = self._fresh_score(states[chosen])
-        return RoutingDecision(frontend.frontend_id, chosen, allowed, score, "route")
+        return RoutingDecision(frontend.frontend_id, chosen, [chosen], score, "route")
 
     def route_least_queue(self, frontend: Frontend, states: Dict[str, ServerState]) -> RoutingDecision:
         allowed = [backend for backend in frontend.allowed_backends if backend in states]
@@ -114,6 +114,41 @@ class ASMFEngine:
 
         score = self._fresh_score(states[best_backend])
         return RoutingDecision(frontend.frontend_id, best_backend, allowed, score, "route")
+
+    def route_asmf_no_sampling(self, frontend: Frontend, states: Dict[str, ServerState]) -> RoutingDecision:
+        allowed = [backend for backend in frontend.allowed_backends if backend in states]
+        if not allowed:
+            return RoutingDecision(frontend.frontend_id, None, [], 0.0, "reject")
+
+        best_backend, best_score = self._argmax_cached(allowed, states)
+        if best_backend is None or best_score < self.config.threshold:
+            return RoutingDecision(frontend.frontend_id, None, allowed, best_score, "reject")
+
+        return RoutingDecision(frontend.frontend_id, best_backend, allowed, best_score, "route")
+
+    def route_asmf_no_feedback(self, frontend: Frontend, states: Dict[str, ServerState]) -> RoutingDecision:
+        return self.route(frontend, states)
+
+    def route_asmf_no_multiresource(self, frontend: Frontend, states: Dict[str, ServerState]) -> RoutingDecision:
+        allowed = [backend for backend in frontend.allowed_backends if backend in states]
+        if not allowed:
+            return RoutingDecision(frontend.frontend_id, None, [], 0.0, "reject")
+
+        candidates = self._sample_candidates(allowed)
+        best_backend = None
+        best_score = -1.0
+        for sid in candidates:
+            state = states[sid]
+            denominator = 1.0 + state.queue_length
+            score = state.service_capacity / max(denominator, 1e-8)
+            if score > best_score:
+                best_score = score
+                best_backend = sid
+
+        if best_backend is None or best_score < self.config.threshold:
+            return RoutingDecision(frontend.frontend_id, None, candidates, best_score, "reject")
+
+        return RoutingDecision(frontend.frontend_id, best_backend, candidates, best_score, "route")
 
     def _sample_candidates(self, allowed: List[str]) -> List[str]:
         k = min(self.config.sample_k, len(allowed))

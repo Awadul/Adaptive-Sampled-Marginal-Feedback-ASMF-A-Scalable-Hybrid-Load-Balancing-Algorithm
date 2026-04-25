@@ -82,9 +82,10 @@ python scripts/run_experiments.py
 
 ```bash
 python scripts/run_rigorous_testing.py
+python scripts/analyze_rigorous_results.py
 ```
 
-This runs a longer campaign (5 scenarios x 20 seeds) with 10-minute simulated duration per scenario and writes artifacts to `outputs/rigorous/`.
+This runs the upgraded campaign (8 scenarios x 8 policies x 20 seeds) with 10-minute simulated duration per scenario and writes artifacts to `outputs/rigorous/`.
 
 Outputs are generated in `outputs/benchmark/`:
 
@@ -104,9 +105,21 @@ pytest -q
 ## Policies Included
 
 - `asmf`: proposed algorithm
+- `asmf_no_feedback`: ablation (feedback correction removed)
+- `asmf_no_sampling`: ablation (global allowed set instead of sampled set)
+- `asmf_no_multiresource`: ablation (queue-only style scoring)
+- `gmsr`: oracle full-state baseline
 - `p2c`: power-of-k by shortest sampled queue
 - `least_queue`: global least queue in allowed set
 - `random`: random backend in allowed set
+
+## Rigorous Evaluation Coverage
+
+- Workloads: `poisson`, `bursty`, `zipf_skew`
+- Scale tiers: small (10 backends), medium (50), large (220)
+- Stress scenarios: backend failure, load spike, capacity degradation
+- Communication metrics: `state_updates_sent`, `state_queries`, `bytes_transferred_est`, `queries_per_decision`
+- Convergence metrics: `convergence_time_ms`, `mean_queue_variance`, `oscillation_index`
 
 ## Academic Claims Supported
 
@@ -119,6 +132,12 @@ pytest -q
 
 1. Source code and tests
 2. Benchmark outputs from `outputs/benchmark/`
+3. Rigorous outputs from `outputs/rigorous/` including:
+	- `rigorous_results.csv`
+	- `rigorous_summary_ci.csv`
+	- `asmf_pairwise_improvements.csv`
+	- `pairwise_stat_tests.csv`
+	- `rigorous_time_series.csv`
 3. `docs/PROOF_SIMULATIONS.md`
 4. `docs/GITHUB_PUBLISH_PROTOCOL.md`
 5. Short report section citing ASMF equations and results

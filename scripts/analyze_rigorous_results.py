@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Dict, List
 
@@ -28,6 +29,53 @@ def _bootstrap_ci(values: np.ndarray, n_boot: int = 2000, seed: int = 123) -> tu
         means[i] = np.mean(sample)
     low, high = np.quantile(means, [0.025, 0.975])
     return float(low), float(high)
+
+
+def _normal_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _paired_t_test(vals: np.ndarray) -> tuple[float, float]:
+    n = vals.size
+    if n < 2:
+        return 0.0, 1.0
+    mean = float(np.mean(vals))
+    std = float(np.std(vals, ddof=1))
+    if std <= 1e-12:
+        return 0.0, 1.0
+    t_stat = mean / (std / math.sqrt(n))
+    # Normal approximation is adequate for n=100 paired samples.
+    p = 2.0 * (1.0 - _normal_cdf(abs(t_stat)))
+    return t_stat, float(max(min(p, 1.0), 0.0))
+
+
+def _wilcoxon_signed_rank(vals: np.ndarray) -> tuple[float, float]:
+    nonzero = vals[np.abs(vals) > 1e-12]
+    n = nonzero.size
+    if n == 0:
+        return 0.0, 1.0
+
+    abs_vals = np.abs(nonzero)
+    order = np.argsort(abs_vals)
+    ranks = np.zeros(n, dtype=float)
+    i = 0
+    while i < n:
+        j = i + 1
+        while j < n and abs(abs_vals[order[j]] - abs_vals[order[i]]) <= 1e-12:
+            j += 1
+        avg_rank = 0.5 * (i + 1 + j)
+        for k in range(i, j):
+            ranks[order[k]] = avg_rank
+        i = j
+
+    w_plus = float(np.sum(ranks[nonzero > 0]))
+    mean_w = n * (n + 1) / 4.0
+    var_w = n * (n + 1) * (2 * n + 1) / 24.0
+    if var_w <= 1e-12:
+        return w_plus, 1.0
+    z = (w_plus - mean_w) / math.sqrt(var_w)
+    p = 2.0 * (1.0 - _normal_cdf(abs(z)))
+    return w_plus, float(max(min(p, 1.0), 0.0))
 
 
 def _pairwise(df: pd.DataFrame, baseline: str) -> pd.DataFrame:
@@ -80,10 +128,11 @@ def main() -> None:
     scenario_means.to_csv(out_dir / "scenario_policy_means.csv", index=False)
 
     # Pairwise detailed and scenario aggregate tables.
-    baselines = ["gmsr", "p2c", "least_queue", "random"]
+    baselines = [p for p in sorted(df["policy"].unique().tolist()) if p != "asmf"]
     detailed_parts = []
     scenario_rows = []
     overall_rows = []
+    test_rows = []
 
     for base in baselines:
         merged = _pairwise(df, base)
@@ -101,6 +150,20 @@ def main() -> None:
             entry[f"{metric}_boot95_low"] = lo
             entry[f"{metric}_boot95_high"] = hi
             entry[f"{metric}_ci_excludes_zero"] = bool((lo > 0.0) or (hi < 0.0))
+
+            t_stat, t_p = _paired_t_test(vals)
+            w_stat, w_p = _wilcoxon_signed_rank(vals)
+            test_rows.append(
+                {
+                    "baseline": base,
+                    "metric": metric,
+                    "n": len(vals),
+                    "paired_t_stat": t_stat,
+                    "paired_t_pvalue": t_p,
+                    "wilcoxon_w": w_stat,
+                    "wilcoxon_pvalue": w_p,
+                }
+            )
 
         entry["asmf_wins_throughput_pct"] = float((merged["throughput_asmf"] > merged["throughput_base"]).mean() * 100.0)
         entry["asmf_wins_wait_pct"] = float((merged["avg_wait_time_asmf"] < merged["avg_wait_time_base"]).mean() * 100.0)
@@ -129,6 +192,7 @@ def main() -> None:
     pd.DataFrame(scenario_rows).sort_values(["scenario", "baseline"]).to_csv(
         out_dir / "scenario_pairwise_improvements.csv", index=False
     )
+    pd.DataFrame(test_rows).to_csv(out_dir / "pairwise_stat_tests.csv", index=False)
 
     print("Rigorous analysis complete.")
     print("Wrote:")
@@ -138,6 +202,7 @@ def main() -> None:
         "pairwise_detailed.csv",
         "asmf_pairwise_improvements.csv",
         "scenario_pairwise_improvements.csv",
+        "pairwise_stat_tests.csv",
     ]:
         print(f"- outputs/rigorous/{name}")
 
