@@ -35,6 +35,7 @@ class SimulationConfig:
     trace_interval_ms: int = 1000
     convergence_window_points: int = 12
     convergence_tolerance: float = 0.05
+    capture_diagnostics: bool = True
 
 
 class LoadBalancingSimulator:
@@ -122,9 +123,10 @@ class LoadBalancingSimulator:
             total_queue = sum(st.queue_length for st in states.values())
             metrics.backlog_area += total_queue * (self.config.time_step_ms / 1000.0)
             metrics.max_queue_observed = max(metrics.max_queue_observed, total_queue)
-            metrics.queue_snapshots[now_ms] = {sid: st.queue_length for sid, st in states.items()}
+            if self.config.capture_diagnostics:
+                metrics.queue_snapshots[now_ms] = {sid: st.queue_length for sid, st in states.items()}
 
-            if now_ms % max(self.config.trace_interval_ms, self.config.time_step_ms) == 0:
+            if self.config.capture_diagnostics and now_ms % max(self.config.trace_interval_ms, self.config.time_step_ms) == 0:
                 queue_values = [st.queue_length for st in states.values()]
                 queue_mean = float(sum(queue_values) / max(len(queue_values), 1))
                 queue_var = float(np.var(queue_values)) if queue_values else 0.0
@@ -156,7 +158,7 @@ class LoadBalancingSimulator:
         if metrics.convergence_time_ms == 0:
             metrics.convergence_time_ms = self.config.duration_ms
 
-        if len(queue_trace) > 1:
+        if self.config.capture_diagnostics and len(queue_trace) > 1:
             metrics.mean_queue_variance = float(np.var(queue_trace))
             deltas = [abs(queue_trace[i] - queue_trace[i - 1]) for i in range(1, len(queue_trace))]
             metrics.oscillation_index = float(sum(deltas) / len(deltas))
