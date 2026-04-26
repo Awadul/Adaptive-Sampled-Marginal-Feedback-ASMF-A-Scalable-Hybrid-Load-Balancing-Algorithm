@@ -46,7 +46,7 @@ $$
 $$
 
 $$
-C_j(t+1) = \operatorname{clip}\left(C_j(t) - \eta \Delta_j, C_{min}, C_{max}\right)
+C_j(t+1) = \mathrm{clip}\left(C_j(t) - \eta \Delta_j, C_{min}, C_{max}\right)
 $$
 
 Final score used for routing:
